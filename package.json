@@ -1,0 +1,39 @@
+{
+	"name": "copilot-brain",
+	"displayName": "Copilot Brain",
+	"description": "Output channel showing every Copilot Chat request: model (even in Auto), tokens, context fill, latency, cost and thinking.",
+	"publisher": "varoindustries",
+	"version": "0.0.1",
+	"license": "UNLICENSED",
+	"repository": "https://github.com/VAROIndustries/VSCodeCoPilotBrain",
+	"engines": {
+		"vscode": "^1.90.0"
+	},
+	"activationEvents": [
+		"onStartupFinished"
+	],
+	"main": "./extension.js",
+	"contributes": {
+		"commands": [
+			{ "command": "copilotBrain.show", "title": "Copilot Brain: Show Output" }
+		],
+		"configuration": {
+			"title": "Copilot Brain",
+			"properties": {
+				"copilotBrain.showThinking": {
+					"type": "boolean",
+					"default": true,
+					"description": "Print the model's thinking text under each request, when Copilot records it."
+				},
+				"copilotBrain.showBackground": {
+					"type": "boolean",
+					"default": true,
+					"description": "Include background requests (titles, todo agent, summaries), not just chat panel turns."
+				}
+			}
+		}
+	},
+	"scripts": {
+		"test": "node test.js"
+	}
+}

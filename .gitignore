@@ -1,0 +1,3 @@
+node_modules/
+*.vsix
+logs/session_log.md
