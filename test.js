@@ -2,7 +2,7 @@ const assert = require('assert');
 const Module = require('module');
 const load = Module._load;
 Module._load = (req, ...a) => (req === 'vscode' ? {} : load(req, ...a));
-const { parseLogLine, parseMeta, findThinking, formatLine } = require('./extension');
+const { lastStartup, parseLogLine, parseMeta, findThinking, formatLine } = require('./extension');
 
 const r = parseLogLine('2026-10-22 09:45:14.337 [info] ccreq:7880ce31.copilotmd | success | gpt-6-luna | 2730ms | [panel/editAgent]');
 assert.deepStrictEqual(r, { time: '2026-10-22 09:45:14.337', id: '7880ce31', status: 'success', model: 'gpt-6-luna', ms: 2730, location: 'panel/editAgent' });
@@ -33,4 +33,6 @@ assert.strictEqual(formatLine(r, parseMeta('')), '09:45:14 ✓ gpt-6-luna | pane
 
 assert.strictEqual(findThinking({ a: [{ thinking: { text: ['step 1 ', 'step 2'] } }] }), 'step 1 step 2');
 assert.strictEqual(findThinking({ a: 1 }), undefined);
+assert.strictEqual(lastStartup(['a', '2026-10-20 [info] Copilot Chat: 0.69.0, VS Code', 'b', '2026-10-22 [info] Copilot Chat: 0.70.0, VS Code', 'c']), 3);
+assert.strictEqual(lastStartup(['a', 'b']), 0);
 console.log('ok');

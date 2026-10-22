@@ -10,6 +10,12 @@ function parseLogLine(line) {
   return m && { time: m[1], id: m[2], status: m[3], model: m[4], ms: +m[5], location: m[6] };
 }
 
+// Index of Copilot Chat's most recent startup line ("[info] Copilot Chat: 0.70.0, VS Code: 1.142.0"), or 0.
+function lastStartup(lines) {
+  for (let i = lines.length - 1; i >= 0; i--) if (/\] Copilot Chat: \d/.test(lines[i])) return i;
+  return 0;
+}
+
 // Pulls the "key : value" metadata block out of a ccreq:<id>.copilotmd document.
 function parseMeta(md) {
   const get = (key) => {
@@ -67,7 +73,8 @@ async function readDoc(uri) {
     try {
       const text = (await vscode.workspace.openTextDocument(vscode.Uri.parse(uri))).getText();
       if (text !== 'Request not found') return text;
-    } catch { /* provider not ready */ }
+      readDoc.lastError = text;
+    } catch (e) { readDoc.lastError = String(e); }
     await new Promise((r) => setTimeout(r, 1000));
   }
 }
@@ -84,6 +91,7 @@ function activate(context) {
   item.show();
   out.appendLine(`Watching ${log}`);
 
+  let warned = false;
   const totals = { req: 0, tokens: 0, aic: 0, byModel: {} };
   const updateStatus = (meta) => {
     const ctx = meta.prompt !== undefined && meta.maxPromptTokens ? ` · ctx ${Math.round((100 * meta.prompt) / meta.maxPromptTokens)}%` : '';
@@ -96,8 +104,10 @@ function activate(context) {
   const handle = async (r) => {
     const cfg = vscode.workspace.getConfiguration('copilotBrain');
     if (!cfg.get('showBackground') && !r.location.startsWith('panel/')) return;
-    const meta = parseMeta((await readDoc(`ccreq:${r.id}.copilotmd`)) || '');
+    const md = await readDoc(`ccreq:${r.id}.copilotmd`);
+    const meta = parseMeta(md || '');
     out.appendLine(formatLine(r, meta));
+    if (!md && !warned) { warned = true; out.appendLine(`    (no token details from ccreq:${r.id}: ${readDoc.lastError})`); }
 
     const model = meta.resolvedModel || r.model;
     const tok = (meta.prompt || 0) + (meta.completion || 0);
@@ -106,7 +116,7 @@ function activate(context) {
     t.req++; t.tokens += tok;
     if (r.location.startsWith('panel/')) updateStatus(meta); else updateStatus({});
 
-    if (cfg.get('showThinking')) {
+    if (md && cfg.get('showThinking')) {
       let thinking;
       try { thinking = findThinking(JSON.parse((await readDoc(`ccreq:${r.id}.json`)) || 'null')); } catch { /* not json */ }
       if (thinking) out.appendLine(thinking.trim().split(/\r?\n/).map((l) => `    💭 ${l}`).join('\n'));
@@ -116,6 +126,7 @@ function activate(context) {
   // Serialize so output stays in log order.
   let queue = Promise.resolve();
   let offset = 0;
+  let first = true;
   const read = () => {
     let size;
     try { size = fs.statSync(log).size; } catch { return; } // log not created yet
@@ -129,7 +140,14 @@ function activate(context) {
     const lastNl = text.lastIndexOf('\n');
     if (lastNl < 0) return; // wait for a full line
     offset += Buffer.byteLength(text.slice(0, lastNl + 1));
-    for (const line of text.slice(0, lastNl).split(/\r?\n/)) {
+    let lines = text.slice(0, lastNl).split(/\r?\n/);
+    if (first) {
+      // The log spans the whole VS Code session, but Copilot only keeps request details since it last
+      // activated, so skip everything before its latest startup line.
+      first = false;
+      lines = lines.slice(lastStartup(lines));
+    }
+    for (const line of lines) {
       const r = parseLogLine(line);
       if (r) queue = queue.then(() => handle(r)).catch((e) => out.appendLine(`error: ${e}`));
     }
@@ -142,4 +160,4 @@ function activate(context) {
     { dispose: () => fs.unwatchFile(log, read) });
 }
 
-module.exports = { activate, deactivate() {}, parseLogLine, parseMeta, findThinking, formatLine };
+module.exports = { activate, deactivate() {}, lastStartup, parseLogLine, parseMeta, findThinking, formatLine };
