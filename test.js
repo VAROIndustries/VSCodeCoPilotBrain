@@ -35,4 +35,31 @@ assert.strictEqual(findThinking({ a: [{ thinking: { text: ['step 1 ', 'step 2'] 
 assert.strictEqual(findThinking({ a: 1 }), undefined);
 assert.strictEqual(lastStartup(['a', '2026-10-20 [info] Copilot Chat: 0.69.0, VS Code', 'b', '2026-10-22 [info] Copilot Chat: 0.70.0, VS Code', 'c']), 3);
 assert.strictEqual(lastStartup(['a', 'b']), 0);
+const { cleanMd, sessionEvents, readNew } = require('./extension');
+assert.strictEqual(cleanMd('Read [](file:///c%3A/Projects/CWE%20Midwest/Foo%20Bar.md), lines 1 to 5'), 'Read Foo Bar.md, lines 1 to 5');
+assert.strictEqual(cleanMd('Searched for `a\\|b`'), 'Searched for `a|b`');
+
+const st = {};
+const tool = (id, complete, extra = {}) => ({ kind: 'toolInvocationSerialized', toolCallId: id, isComplete: complete, invocationMessage: { value: `Reading ${id}` }, pastTenseMessage: { value: `Read ${id}` }, ...extra });
+assert.deepStrictEqual(sessionEvents(st, { kind: 2, k: ['requests'], v: [{ message: { text: 'fix the bug' } }] }), ['▶ fix the bug']);
+assert.deepStrictEqual(sessionEvents(st, { kind: 2, k: ['requests', 3, 'response'], v: [tool('a', false), { kind: 'thinking', value: [] }] }), []);
+// Splice re-sends 'a' now complete, plus a hidden tool and a new one.
+assert.deepStrictEqual(sessionEvents(st, { kind: 2, k: ['requests', 3, 'response'], i: 0, v: [tool('a', true), tool('h', true, { presentation: 'hidden' }), tool('b', true)] }), ['    🔧 Read a', '    🔧 Read b']);
+assert.deepStrictEqual(sessionEvents(st, { kind: 2, k: ['requests', 3, 'response'], i: 0, v: [tool('a', true), tool('b', true)] }), []);
+sessionEvents(st, { kind: 1, k: ['requests', 3, 'promptTokens'], v: 114899 });
+sessionEvents(st, { kind: 1, k: ['requests', 3, 'completionTokens'], v: 3319 });
+sessionEvents(st, { kind: 1, k: ['requests', 3, 'copilotCredits'], v: 2.0931 });
+sessionEvents(st, { kind: 1, k: ['requests', 3, 'elapsedMs'], v: 357648 });
+sessionEvents(st, { kind: 1, k: ['requests', 3, 'promptTokenDetails'], v: [{ label: 'System Instructions', percentageOfPrompt: 16 }, { label: 'Messages', percentageOfPrompt: 28 }] });
+assert.deepStrictEqual(sessionEvents(st, { kind: 1, k: ['requests', 3, 'modelState'], v: { value: 0 } }), []);
+assert.deepStrictEqual(sessionEvents(st, { kind: 1, k: ['requests', 3, 'modelState'], v: { value: 1, completedAt: 1 } }),
+  ['    ✔ turn done · 114,899 in · 3,319 out · 2.09 credits · 357.6s · ctx: System Instructions 16%, Messages 28%']);
+assert.deepStrictEqual(sessionEvents(st, { kind: 1, k: ['requests', 3, 'modelState'], v: { value: 1, completedAt: 2 } }), []);
+
+const tmp = require('path').join(require('os').tmpdir(), `brain-${process.pid}.jsonl`);
+require('fs').writeFileSync(tmp, 'one\ntwo\npart');
+const got = readNew(tmp, 0);
+assert.deepStrictEqual(got, { offset: 8, lines: ['one', 'two'] });
+assert.strictEqual(readNew(tmp, got.offset), null); // partial line waits
+require('fs').unlinkSync(tmp);
 console.log('ok');

@@ -123,24 +123,17 @@ function activate(context) {
     }
   };
 
-  // Serialize so output stays in log order.
+  // Serialize so output stays in arrival order (log lines await ccreq docs).
   let queue = Promise.resolve();
+  const emit = (fn) => { queue = queue.then(fn).catch((e) => out.appendLine(`error: ${e}`)); };
+
   let offset = 0;
   let first = true;
   const read = () => {
-    let size;
-    try { size = fs.statSync(log).size; } catch { return; } // log not created yet
-    if (size < offset) offset = 0;
-    if (size === offset) return;
-    const fd = fs.openSync(log, 'r');
-    const buf = Buffer.alloc(size - offset);
-    fs.readSync(fd, buf, 0, buf.length, offset);
-    fs.closeSync(fd);
-    const text = buf.toString('utf8');
-    const lastNl = text.lastIndexOf('\n');
-    if (lastNl < 0) return; // wait for a full line
-    offset += Buffer.byteLength(text.slice(0, lastNl + 1));
-    let lines = text.slice(0, lastNl).split(/\r?\n/);
+    const got = readNew(log, offset);
+    if (!got) return;
+    offset = got.offset;
+    let lines = got.lines;
     if (first) {
       // The log spans the whole VS Code session, but Copilot only keeps request details since it last
       // activated, so skip everything before its latest startup line.
@@ -149,15 +142,109 @@ function activate(context) {
     }
     for (const line of lines) {
       const r = parseLogLine(line);
-      if (r) queue = queue.then(() => handle(r)).catch((e) => out.appendLine(`error: ${e}`));
+      if (r) emit(() => handle(r));
     }
   };
-
   read();
-  fs.watchFile(log, { interval: 1000 }, read);
+  const timer = setInterval(read, 1000);
+  context.subscriptions.push({ dispose: () => clearInterval(timer) });
+
+  // Tool steps come from the chat session files VS Code keeps for this workspace.
+  if (context.storageUri) {
+    const dir = path.join(path.dirname(context.storageUri.fsPath), 'chatSessions');
+    const files = {}; // file -> { offset, state }
+    // Sessions that already exist start at EOF (they can be tens of MB); new ones are read from the start.
+    try {
+      for (const f of fs.readdirSync(dir)) if (f.endsWith('.jsonl')) files[f] = { offset: fs.statSync(path.join(dir, f)).size, state: {} };
+    } catch { /* no chats in this workspace yet */ }
+    const poll = () => {
+      if (!vscode.workspace.getConfiguration('copilotBrain').get('showTools')) return;
+      let names;
+      try { names = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')); } catch { return; }
+      for (const f of names) {
+        const s = (files[f] ||= { offset: 0, state: {} });
+        const got = readNew(path.join(dir, f), s.offset);
+        if (!got) continue;
+        s.offset = got.offset;
+        for (const line of got.lines) {
+          let patch;
+          try { patch = JSON.parse(line); } catch { continue; }
+          for (const msg of sessionEvents(s.state, patch)) emit(() => out.appendLine(msg));
+        }
+      }
+    };
+    const sessionTimer = setInterval(poll, 1000);
+    context.subscriptions.push({ dispose: () => clearInterval(sessionTimer) });
+  }
+
   context.subscriptions.push(out, item,
-    vscode.commands.registerCommand('copilotBrain.show', () => out.show(true)),
-    { dispose: () => fs.unwatchFile(log, read) });
+    vscode.commands.registerCommand('copilotBrain.show', () => out.show(true)));
 }
 
-module.exports = { activate, deactivate() {}, lastStartup, parseLogLine, parseMeta, findThinking, formatLine };
+// Reads complete lines appended to `file` since byte `offset`. Returns null if nothing new.
+function readNew(file, offset) {
+  let size;
+  try { size = fs.statSync(file).size; } catch { return null; }
+  if (size < offset) offset = 0; // truncated / rotated
+  if (size === offset) return null;
+  const fd = fs.openSync(file, 'r');
+  const buf = Buffer.alloc(size - offset);
+  fs.readSync(fd, buf, 0, buf.length, offset);
+  fs.closeSync(fd);
+  const lastNl = buf.lastIndexOf(10);
+  if (lastNl < 0) return null; // wait for a full line
+  return { offset: offset + lastNl + 1, lines: buf.toString('utf8', 0, lastNl).split(/\r?\n/).filter(Boolean) };
+}
+
+// "Read [](file:///c%3A/x/Foo.md), lines 1 to 5" -> "Read Foo.md, lines 1 to 5"
+function cleanMd(s) {
+  return s
+    .replace(/\[([^\]]*)\]\(([^)]+)\)/g, (_, text, url) => text || decodeURIComponent(url.split('/').pop()))
+    .replace(/\\(.)/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200);
+}
+
+// Applies one chat-session jsonl patch ({kind, k, v, i}) and returns lines to print.
+// ponytail: undocumented VS Code format; kind 1 = set k to v, kind 2 = append/splice v into array k.
+function sessionEvents(state, { kind, k, v }) {
+  const out = [];
+  if (!Array.isArray(k)) return out;
+  if (kind === 2 && k.length === 1 && k[0] === 'requests') {
+    for (const r of v) {
+      const text = r?.message?.text;
+      if (text) out.push(`▶ ${cleanMd(text).slice(0, 120)}`);
+    }
+    return out;
+  }
+  if (k[0] !== 'requests' || typeof k[1] !== 'number') return out;
+  const req = ((state.reqs ||= {})[k[1]] ||= { tools: new Set() });
+  const field = k[2];
+  if (kind === 2 && field === 'response') {
+    for (const p of v) {
+      if (p?.kind !== 'toolInvocationSerialized' || !p.isComplete || p.presentation === 'hidden') continue;
+      const id = p.toolCallId || JSON.stringify(p.invocationMessage);
+      if (req.tools.has(id)) continue; // re-sent when the response is spliced
+      req.tools.add(id);
+      const msg = p.pastTenseMessage?.value || p.invocationMessage?.value || p.toolId;
+      if (msg) out.push(`    🔧 ${cleanMd(msg)}`);
+    }
+  } else if (kind === 1) {
+    if (['promptTokens', 'completionTokens', 'copilotCredits', 'elapsedMs', 'promptTokenDetails'].includes(field)) req[field] = v;
+    if (field === 'modelState' && v?.completedAt && !req.done) {
+      req.done = true;
+      const parts = ['    ✔ turn done'];
+      if (req.promptTokens !== undefined) parts.push(`${n(req.promptTokens)} in`, `${n(req.completionTokens)} out`);
+      if (req.copilotCredits !== undefined) parts.push(`${req.copilotCredits.toFixed(2)} credits`);
+      if (req.elapsedMs !== undefined) parts.push(`${(req.elapsedMs / 1000).toFixed(1)}s`);
+      if (Array.isArray(req.promptTokenDetails)) {
+        parts.push('ctx: ' + req.promptTokenDetails.map((d) => `${d.label} ${d.percentageOfPrompt}%`).join(', '));
+      }
+      out.push(parts.join(' · '));
+    }
+  }
+  return out;
+}
+
+module.exports = { activate, deactivate() {}, lastStartup, parseLogLine, parseMeta, findThinking, formatLine, readNew, cleanMd, sessionEvents };
