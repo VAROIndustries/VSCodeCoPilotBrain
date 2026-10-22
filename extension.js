@@ -177,8 +177,102 @@ function activate(context) {
     context.subscriptions.push({ dispose: () => clearInterval(sessionTimer) });
   }
 
-  context.subscriptions.push(out, item,
+  // Agent-host chats (Copilot CLI backend) never hit the Copilot Chat log; they stream events here instead.
+  // ponytail: shows every CLI session on the machine, not just this window's; filter on workspace.yaml cwd if that gets noisy.
+  const cliDir = path.join(require('os').homedir(), '.copilot', 'session-state');
+  const cli = {}; // events.jsonl path -> { offset, state }
+  try {
+    for (const d of fs.readdirSync(cliDir)) {
+      const f = path.join(cliDir, d, 'events.jsonl');
+      try { cli[f] = { offset: fs.statSync(f).size, state: {} }; } catch { /* no events yet */ }
+    }
+  } catch { /* CLI never used */ }
+  const pollCli = () => {
+    const cfg = vscode.workspace.getConfiguration('copilotBrain');
+    let dirs;
+    try { dirs = fs.readdirSync(cliDir); } catch { return; }
+    for (const d of dirs) {
+      const f = path.join(cliDir, d, 'events.jsonl');
+      const s = (cli[f] ||= { offset: 0, state: {} });
+      const got = readNew(f, s.offset);
+      if (!got) continue;
+      s.offset = got.offset;
+      for (const line of got.lines) {
+        let ev;
+        try { ev = JSON.parse(line); } catch { continue; }
+        const u = ev.type === 'session.usage_record' && ev.data?.usage;
+        if (u) {
+          const tok = (u.inputTokens || 0) + (u.outputTokens || 0);
+          totals.req++; totals.tokens += tok;
+          const t = (totals.byModel[u.model] ||= { req: 0, tokens: 0 });
+          t.req++; t.tokens += tok;
+          updateStatus({});
+        }
+        for (const msg of cliEvents(s.state, ev, { thinking: cfg.get('showThinking'), tools: cfg.get('showTools') })) emit(() => out.appendLine(msg));
+      }
+    }
+  };
+  const cliTimer = setInterval(pollCli, 1000);
+
+  context.subscriptions.push(out, item, { dispose: () => clearInterval(cliTimer) },
     vscode.commands.registerCommand('copilotBrain.show', () => out.show(true)));
+}
+
+const hhmmss = (iso) => { const d = new Date(iso); return isNaN(d) ? '' : d.toTimeString().slice(0, 8); };
+
+// Short label for a CLI tool call: its title if it has one, else name + the most telling argument.
+function toolLabel(d) {
+  if (d.toolTitle) return d.toolTitle;
+  const a = d.arguments || {};
+  const arg = a.description || a.path || a.query || a.pattern || a.url || a.command || a.title || '';
+  return `${d.toolName}${arg ? ` ${arg}` : ''}`;
+}
+
+// Turns one Copilot CLI events.jsonl event ({type, data, timestamp}) into lines to print.
+// ponytail: undocumented CLI format, field names taken from observed events.
+function cliEvents(state, { type, data: d = {}, timestamp }, opts = { thinking: true, tools: true }) {
+  const out = [];
+  const t = hhmmss(timestamp);
+  const one = (s) => String(s).replace(/\s+/g, ' ').trim().slice(0, 160); // plain text, not markdown: keep backslashes
+  switch (type) {
+    case 'user.message':
+      if (d.content) out.push(`▶ ${one(d.content)}`);
+      break;
+    case 'session.auto_mode_resolved':
+      if (d.chosenModel) out.push(`  🧭 Auto → ${d.chosenModel}`);
+      break;
+    case 'session.usage_record': {
+      const u = d.usage || {};
+      out.push(`${t} ✓ ${u.modelDisplayName || u.model} | cli` +
+        ` | in ${n(u.inputTokens)}` + (u.cacheReadTokens ? ` (${n(u.cacheReadTokens)} cached)` : '') +
+        ` out ${n(u.outputTokens)}` + (u.reasoningTokens ? ` (${n(u.reasoningTokens)} reasoning)` : ''));
+      break;
+    }
+    case 'assistant.message':
+      if (opts.thinking && d.reasoningText) {
+        out.push(...String(d.reasoningText).trim().split(/\r?\n/).filter(Boolean).map((l) => `    💭 ${l}`));
+      }
+      break;
+    case 'tool.execution_start':
+      (state.tools ||= {})[d.toolCallId] = toolLabel(d);
+      break;
+    case 'tool.execution_complete': {
+      const label = state.tools?.[d.toolCallId];
+      if (state.tools) delete state.tools[d.toolCallId];
+      if (opts.tools && label) out.push(`    🔧 ${one(label)}${d.success === false ? ' ✗' : ''}`);
+      break;
+    }
+    case 'subagent.completed':
+      out.push(`    🤖 ${d.agentDisplayName || d.agentName} (${d.model}) · ${d.totalToolCalls ?? 0} tools · ${n(d.totalTokens)} tok · ${((d.durationMs || 0) / 1000).toFixed(1)}s`);
+      break;
+    case 'session.usage_checkpoint':
+      if (d.totalNanoAiu !== undefined && d.totalNanoAiu !== state.lastAiu) {
+        state.lastAiu = d.totalNanoAiu;
+        out.push(`    ✔ session so far · ${d.totalPremiumRequests ?? 0} premium req · ${(d.totalNanoAiu / 1e9).toFixed(2)} AIC`);
+      }
+      break;
+  }
+  return out;
 }
 
 // Reads complete lines appended to `file` since byte `offset`. Returns null if nothing new.
@@ -247,4 +341,4 @@ function sessionEvents(state, { kind, k, v }) {
   return out;
 }
 
-module.exports = { activate, deactivate() {}, lastStartup, parseLogLine, parseMeta, findThinking, formatLine, readNew, cleanMd, sessionEvents };
+module.exports = { activate, deactivate() {}, lastStartup, parseLogLine, parseMeta, findThinking, formatLine, readNew, cleanMd, sessionEvents, cliEvents };

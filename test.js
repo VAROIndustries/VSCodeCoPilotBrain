@@ -56,7 +56,26 @@ assert.deepStrictEqual(sessionEvents(st, { kind: 1, k: ['requests', 3, 'modelSta
   ['    ✔ turn done · 114,899 in · 3,319 out · 2.09 credits · 357.6s · ctx: System Instructions 16%, Messages 28%']);
 assert.deepStrictEqual(sessionEvents(st, { kind: 1, k: ['requests', 3, 'modelState'], v: { value: 1, completedAt: 2 } }), []);
 
-const tmp = require('path').join(require('os').tmpdir(), `brain-${process.pid}.jsonl`);
+const { cliEvents } = require('./extension');
+const cs = {};
+const ts = '2026-10-22T15:31:11.000Z';
+assert.deepStrictEqual(cliEvents(cs, { type: 'user.message', data: { content: 'what next?' } }), ['▶ what next?']);
+assert.deepStrictEqual(cliEvents(cs, { type: 'session.auto_mode_resolved', data: { chosenModel: 'gpt-6-luna' } }), ['  🧭 Auto → gpt-6-luna']);
+assert.deepStrictEqual(cliEvents(cs, { type: 'tool.execution_start', data: { toolCallId: 'c1', toolName: 'view', arguments: { path: 'C:\\x\\Plan.md' } } }), []);
+assert.deepStrictEqual(cliEvents(cs, { type: 'tool.execution_start', data: { toolCallId: 'c2', toolName: 'grep', toolTitle: 'Search for retention', arguments: {} } }), []);
+assert.deepStrictEqual(cliEvents(cs, { type: 'tool.execution_complete', data: { toolCallId: 'c1', success: true } }), ['    🔧 view C:\\x\\Plan.md']);
+assert.deepStrictEqual(cliEvents(cs, { type: 'tool.execution_complete', data: { toolCallId: 'c2', success: false } }), ['    🔧 Search for retention ✗']);
+assert.deepStrictEqual(cliEvents(cs, { type: 'tool.execution_complete', data: { toolCallId: 'c2', success: true } }), []); // unknown id
+assert.deepStrictEqual(cliEvents(cs, { type: 'tool.execution_complete', data: { toolCallId: 'c3' } }, { tools: false }), []);
+const usage = cliEvents(cs, { type: 'session.usage_record', timestamp: ts, data: { usage: { model: 'gpt-6-luna', inputTokens: 64000, cacheReadTokens: 30000, outputTokens: 1234, reasoningTokens: 512 } } });
+assert.match(usage[0], /^\d\d:\d\d:\d\d ✓ gpt-6-luna \| cli \| in 64,000 \(30,000 cached\) out 1,234 \(512 reasoning\)$/);
+assert.deepStrictEqual(cliEvents(cs, { type: 'assistant.message', data: { reasoningText: 'a\n\nb' } }), ['    💭 a', '    💭 b']);
+assert.deepStrictEqual(cliEvents(cs, { type: 'assistant.message', data: { reasoningText: 'a' } }, { thinking: false }), []);
+assert.deepStrictEqual(cliEvents(cs, { type: 'session.usage_checkpoint', data: { totalNanoAiu: 2.5e9, totalPremiumRequests: 3 } }), ['    ✔ session so far · 3 premium req · 2.50 AIC']);
+assert.deepStrictEqual(cliEvents(cs, { type: 'session.usage_checkpoint', data: { totalNanoAiu: 2.5e9, totalPremiumRequests: 3 } }), []); // unchanged
+assert.deepStrictEqual(cliEvents(cs, { type: 'subagent.completed', data: { agentDisplayName: 'Explore', model: 'gpt-5.3-codex', totalToolCalls: 4, totalTokens: 12000, durationMs: 8500 } }), ['    🤖 Explore (gpt-5.3-codex) · 4 tools · 12,000 tok · 8.5s']);
+
+const tmp =require('path').join(require('os').tmpdir(), `brain-${process.pid}.jsonl`);
 require('fs').writeFileSync(tmp, 'one\ntwo\npart');
 const got = readNew(tmp, 0);
 assert.deepStrictEqual(got, { offset: 8, lines: ['one', 'two'] });

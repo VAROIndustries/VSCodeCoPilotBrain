@@ -3,7 +3,7 @@
 	"displayName": "Copilot Brain",
 	"description": "Output channel showing every Copilot Chat request: model (even in Auto), tokens, context fill, latency, cost and thinking.",
 	"publisher": "varoindustries",
-	"version": "0.0.3",
+	"version": "0.0.4",
 	"license": "UNLICENSED",
 	"repository": "https://github.com/VAROIndustries/VSCodeCoPilotBrain",
 	"engines": {
